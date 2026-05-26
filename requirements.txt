@@ -1,0 +1,7 @@
+streamlit
+reportlab
+matplotlib
+numpy
+pandas
+Pillow
+SQLAlchemy
