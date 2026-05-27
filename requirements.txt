@@ -5,3 +5,5 @@ numpy
 pandas
 Pillow
 SQLAlchemy
+openpyxl
+requests
