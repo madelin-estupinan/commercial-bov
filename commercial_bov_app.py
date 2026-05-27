@@ -1,4 +1,4 @@
-﻿"""
+"""
 Commercial Property Advisory BOV
 Estupinan Group | First Service Realty by ERA
 Standard commercial property valuation for listings, acquisitions, and advisory assignments.
@@ -9,8 +9,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import io, re
+import io, re, requests
 from datetime import datetime, date, timedelta
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
 from pathlib import Path
 from PIL import Image as PILImage
 from reportlab.lib.pagesizes import letter
@@ -73,6 +75,79 @@ def sanitize_pdf_text(value):
     if value is None:
         return ""
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def lookup_miami_dade_pa(folio_number):
+    folio_clean = str(folio_number).strip().replace("-", "").replace(" ", "")
+    url = f"https://www.miamidade.gov/Apps/PA/PApublicServiceProxy/PaServicesProxy.ashx?Operation=GetPropertySearchByFolio&clientAppName=PropertySearch&folioNumber={folio_clean}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.miamidade.gov/propertysearch/",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None, f"Miami-Dade PA returned status {response.status_code}. Check folio number."
+        data = response.json()
+        info = data.get("MinimumPropertyInfos")
+        if isinstance(info, list) and len(info) > 0:
+            info = info[0]
+        if not info:
+            return None, "No property found for that folio number. Verify it on miamidade.gov/propertysearch."
+
+        result = {}
+
+        site_address = info.get("SiteAddress")
+        city = info.get("City")
+        if site_address and city:
+            result["address"] = f"{site_address}, {city}, FL"
+
+        building_list = info.get("BuildingList")
+        if isinstance(building_list, list) and len(building_list) > 0:
+            building = building_list[0]
+            total_area = building.get("TotalArea")
+            year_built = building.get("YearBuilt")
+            units = building.get("Units")
+            if total_area not in (None, "", 0):
+                result["sf"] = int(float(total_area))
+            if year_built not in (None, "", 0):
+                result["yr"] = int(float(year_built))
+            if units not in (None, "", 0):
+                result["units"] = int(float(units))
+
+        land_list = info.get("LandList")
+        if isinstance(land_list, list) and len(land_list) > 0:
+            land = land_list[0]
+            land_area = land.get("LandArea")
+            if land_area not in (None, "", 0):
+                land_area_val = float(land_area)
+                if land_area_val < 100:
+                    land_area_val *= 43560
+                result["lot_sf"] = int(land_area_val)
+
+        owner_name = info.get("OwnerName1")
+        if owner_name:
+            result["owner"] = str(owner_name).title()
+
+        tax_year = info.get("TaxYear")
+        tax_info = None
+        if isinstance(tax_year, list) and len(tax_year) > 0:
+            tax_info = tax_year[0]
+        elif isinstance(tax_year, dict):
+            tax_info = tax_year
+        if isinstance(tax_info, dict):
+            ad_valorem_tax = tax_info.get("AdValoremTax")
+            if ad_valorem_tax not in (None, "", 0):
+                result["tax"] = float(ad_valorem_tax)
+
+        return result, None
+    except requests.exceptions.Timeout:
+        return None, "Miami-Dade PA lookup timed out. Try again or enter details manually."
+    except Exception as exc:
+        return None, f"Lookup failed: {exc} Enter details manually."
 
 st.set_page_config(page_title="Commercial Property Advisory BOV", page_icon="🏢", layout="wide", initial_sidebar_state="collapsed")
 local_db_path = Path(__file__).resolve().with_name("bov_history_local.db") if "__file__" in globals() else Path.cwd() / "bov_history_local.db"
@@ -204,7 +279,44 @@ with tab1:
     st.markdown(sl("Property Identification"), unsafe_allow_html=True)
     c1,c2 = st.columns(2)
     with c1: subj_address = st.text_input("Property Address", key="sa", placeholder="e.g. 4795 SW 8th Street, Miami FL")
-    with c2: subj_folio = st.text_input("Folio Number", key="sf", placeholder="Miami-Dade PA folio")
+    with c2: subj_folio = st.text_input("Folio Number", key="sf", placeholder="e.g. 01-4138-011-0010")
+    if subj_folio and len(subj_folio.replace("-", "").replace(" ", "")) >= 10:
+        lookup_c1, lookup_c2 = st.columns([1, 3])
+        with lookup_c1:
+            do_lookup = st.button("🔍 Autofill from Miami-Dade PA", key="pa_lookup_btn", use_container_width=True)
+        with lookup_c2:
+            pass
+        if do_lookup:
+            with st.spinner("Looking up folio on Miami-Dade Property Appraiser..."):
+                pa_data, pa_error = lookup_miami_dade_pa(subj_folio)
+            if pa_error is not None:
+                st.warning(pa_error)
+            elif pa_data is not None:
+                filled_fields = 0
+                if pa_data.get("address"):
+                    st.session_state["sa"] = pa_data["address"]
+                    filled_fields += 1
+                if pa_data.get("sf"):
+                    st.session_state["ssf"] = pa_data["sf"]
+                    filled_fields += 1
+                if pa_data.get("lot_sf"):
+                    st.session_state["sl2"] = pa_data["lot_sf"]
+                    filled_fields += 1
+                if pa_data.get("yr"):
+                    st.session_state["sy"] = pa_data["yr"]
+                    filled_fields += 1
+                if pa_data.get("units"):
+                    st.session_state["su"] = pa_data["units"]
+                    filled_fields += 1
+                if pa_data.get("owner"):
+                    st.session_state["owner_of_record"] = pa_data["owner"]
+                    filled_fields += 1
+                if pa_data.get("tax"):
+                    st.session_state["ot"] = pa_data["tax"]
+                    st.session_state["_pa_tax_prefilled"] = True
+                    filled_fields += 1
+                st.success(f"{filled_fields} fields were successfully filled.")
+                st.rerun()
     c1,c2,c3 = st.columns(3)
     with c1: subj_type = st.selectbox("Property Type", PROPERTY_TYPES, key="st2")
     with c2: subj_cond = st.selectbox("Condition", CONDITIONS, key="sc")
@@ -298,6 +410,167 @@ with tab1:
 with tab2:
     st.markdown(sl("Comparable Sales (3-8 comps)"), unsafe_allow_html=True)
     st.markdown('<div class="co info">Enter comp data from your research. Includes closed sales and active listings. System auto-calculates $/SF, weights, and flags outliers.</div>', unsafe_allow_html=True)
+    def build_comp_template():
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Comps"
+        headers = [
+            "Address",
+            "Sale Type",
+            "Sale/List Date (YYYY-MM-DD)",
+            "Sale/List Price ($)",
+            "Building SF",
+            "Lot SF",
+            "Year Built",
+            "Renovation Year (0=none)",
+            "Condition",
+            "Occupancy (%)",
+            "Units (MF only)",
+            "Cap Rate (%)",
+            "Distance (miles)",
+            "Adjustment (%)",
+            "Adjustment Notes",
+            "Data Source",
+        ]
+        notes = [
+            "Full property address",
+            "Closed Sale / Active Listing / Expired / Withdrawn",
+            "Format: 2024-06-15",
+            "Total sale or list price",
+            "Gross building area in SF",
+            "Land area in SF",
+            "4-digit year e.g. 1985",
+            "4-digit year 0 if none",
+            "Excellent / Good / Average / Fair / Poor",
+            "0 to 100",
+            "0 if not multifamily",
+            "Leave 0 if unknown",
+            "Miles from subject",
+            "Positive subject superior negative subject inferior",
+            "Brief description of adjustment rationale",
+            "e.g. CoStar Public Records MLS",
+        ]
+        for col_idx, header in enumerate(headers, start=1):
+            ws.cell(row=1, column=col_idx, value=header)
+            ws.cell(row=2, column=col_idx, value=notes[col_idx - 1])
+        header_fill = PatternFill(fill_type="solid", fgColor="1E3A5F")
+        note_fill = PatternFill(fill_type="solid", fgColor="D6E4F0")
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for cell in ws[2]:
+            cell.fill = note_fill
+            cell.font = Font(color="1E3A5F", italic=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for column_cells in ws.columns:
+            ws.column_dimensions[column_cells[0].column_letter].width = 20
+        ws.row_dimensions[1].height = 28
+        ws.row_dimensions[2].height = 32
+        for row_idx in range(3, 11):
+            ws.row_dimensions[row_idx].height = 18
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        return buffer.getvalue()
+
+    comp_dl_col, comp_upload_col, comp_msg_col = st.columns([1, 1, 2])
+    with comp_dl_col:
+        st.download_button(
+            label="⬇ Download Comp Template",
+            data=build_comp_template(),
+            file_name="Estupinan_Comp_Template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download the Excel template, fill in your comps, then upload it below.",
+        )
+    with comp_upload_col:
+        uploaded_comps = st.file_uploader("Upload comp template", type=["xlsx"], key="comp_upload", label_visibility="collapsed")
+    with comp_msg_col:
+        if uploaded_comps is not None:
+            st.markdown('<div class="co info">✅ Comp template uploaded. Fields pre-populated below — review and adjust as needed.</div>', unsafe_allow_html=True)
+
+    if uploaded_comps is not None:
+        upload_signature = (uploaded_comps.name, len(uploaded_comps.getvalue()), hash(uploaded_comps.getvalue()))
+        if st.session_state.get("_comp_upload_signature") != upload_signature:
+            try:
+                workbook = openpyxl.load_workbook(io.BytesIO(uploaded_comps.getvalue()), data_only=True)
+                worksheet = workbook["Comps"] if "Comps" in workbook.sheetnames else workbook.active
+                filled_idx = 0
+                for row in worksheet.iter_rows(min_row=3, max_row=10, values_only=True):
+                    if filled_idx > 7:
+                        break
+                    if not row or row[0] in (None, ""):
+                        continue
+
+                    raw_sale_type = str(row[1]).strip() if row[1] not in (None, "") else ""
+                    sale_type_norm = raw_sale_type.lower()
+                    if sale_type_norm == "active listing":
+                        sale_type = "Active Listing"
+                    elif sale_type_norm in {"expired", "withdrawn"}:
+                        sale_type = "Active Listing"
+                    elif sale_type_norm == "reo/distressed":
+                        sale_type = "REO/Distressed"
+                    elif raw_sale_type in SALE_TYPES:
+                        sale_type = raw_sale_type
+                    else:
+                        sale_type = "Arms-length"
+
+                    raw_date = row[2]
+                    comp_date = date.today() - timedelta(days=90 * (filled_idx + 1))
+                    if isinstance(raw_date, datetime):
+                        comp_date = raw_date.date()
+                    elif isinstance(raw_date, date):
+                        comp_date = raw_date
+                    elif raw_date not in (None, ""):
+                        try:
+                            comp_date = datetime.strptime(str(raw_date).strip(), "%Y-%m-%d").date()
+                        except ValueError:
+                            pass
+
+                    raw_condition = str(row[8]).strip() if row[8] not in (None, "") else ""
+                    if raw_condition in CONDITIONS:
+                        comp_condition = raw_condition
+                    elif raw_condition.lower() == "average":
+                        comp_condition = "Good"
+                    else:
+                        comp_condition = "Good"
+
+                    def _safe_float(value, default=0.0):
+                        try:
+                            return float(value)
+                        except (TypeError, ValueError):
+                            return default
+
+                    def _safe_int(value, default=0):
+                        try:
+                            return int(float(value))
+                        except (TypeError, ValueError):
+                            return default
+
+                    st.session_state[f"ca{filled_idx}"] = str(row[0]).strip()
+                    st.session_state[f"cs{filled_idx}"] = sale_type
+                    st.session_state[f"cd{filled_idx}"] = comp_date
+                    st.session_state[f"cp{filled_idx}"] = max(_safe_int(row[3]), 0)
+                    st.session_state[f"csf{filled_idx}"] = max(_safe_int(row[4]), 0)
+                    st.session_state[f"cl{filled_idx}"] = max(_safe_int(row[5]), 0)
+                    st.session_state[f"cy{filled_idx}"] = max(_safe_int(row[6], 1985), 1900)
+                    st.session_state[f"crn{filled_idx}"] = max(_safe_int(row[7]), 0)
+                    st.session_state[f"cc{filled_idx}"] = comp_condition
+                    st.session_state[f"co{filled_idx}"] = min(max(_safe_float(row[9]), 0.0), 100.0)
+                    st.session_state[f"cu{filled_idx}"] = max(_safe_int(row[10]), 0)
+                    st.session_state[f"cr{filled_idx}"] = min(max(_safe_float(row[11]), 0.0), 20.0)
+                    st.session_state[f"cdi{filled_idx}"] = min(max(_safe_float(row[12]), 0.0), 20.0)
+                    st.session_state[f"caj{filled_idx}"] = min(max(_safe_float(row[13]), -50.0), 50.0)
+                    st.session_state[f"cn{filled_idx}"] = "" if row[14] in (None, "") else str(row[14]).strip()
+                    st.session_state[f"cds{filled_idx}"] = "" if row[15] in (None, "") else str(row[15]).strip()
+                    filled_idx += 1
+
+                st.session_state["nc"] = max(3, min(8, filled_idx))
+                st.session_state["nci"] = max(3, min(8, filled_idx))
+                st.session_state["_comp_upload_signature"] = upload_signature
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Unable to import comp template: {exc}")
     _,rc = st.columns([3,1])
     with rc: num_c = st.number_input("Number of Comps", min_value=3, max_value=8, value=st.session_state.nc, key="nci")
     st.session_state.nc = num_c
@@ -482,7 +755,7 @@ with tab3:
             total_rent_roll_sf = (unit_mix_df["Count"] * unit_mix_df["Avg. SF"]).sum()
             if subj_sf > 0 and abs(total_rent_roll_sf - subj_sf) > (subj_sf * 0.01):
                 st.warning(f"Data Discrepancy: Rent Roll SF ({int(total_rent_roll_sf):,}) does not match Building SF ({subj_sf:,})")
-            gpr = total_market_mo * 12
+            gpr = total_current_mo * 12
             physical_vacancy_loss = (unit_mix_df["Vacant Count"] * unit_mix_df["Market Rent/Mo"]).sum() * 12
             occupied_count = (unit_mix_df["Count"] - unit_mix_df["Vacant Count"]).clip(lower=0)
             loss_to_lease = (occupied_count * (unit_mix_df["Market Rent/Mo"] - unit_mix_df["Current Rent/Mo"]).clip(lower=0)).sum() * 12
@@ -501,7 +774,7 @@ with tab3:
             with c2: reimb = st.number_input("Expense Reimb. (NNN) ($)", min_value=0.0, value=0.0, step=5000.0, key="reimb_input_quick")
             with c3: vac_rate = st.number_input("Vacancy & Credit Loss (%)", min_value=0.0, max_value=50.0, value=5.0, step=1.0, key="vr_quick")
         if use_unit_mix:
-            credit_loss_base = max(gpr - physical_vacancy_loss - loss_to_lease + reimb, 0.0)
+            credit_loss_base = max(gpr - physical_vacancy_loss + reimb, 0.0)
             credit_loss_amount = credit_loss_base * (vac_rate/100)
             egi = credit_loss_base - credit_loss_amount
         else:
@@ -512,21 +785,41 @@ with tab3:
         if use_unit_mix:
             st.markdown(f'<div class="mc blue"><div class="ml">Annual Loss to Lease</div><div class="mv blue" style="font-size:1.1rem;">{fmt_d(loss_to_lease)}</div><div class="rr"><span class="l">Rent Upside %</span><span class="v">{rent_upside_pct:.1f}%</span></div></div>', unsafe_allow_html=True)
         st.markdown(sl("Operating Expenses (Annual)"), unsafe_allow_html=True)
-        c1,c2,c3 = st.columns(3)
-        with c1: opex_tax = st.number_input("Property Taxes", min_value=0.0, value=0.0, step=1000.0, key="ot")
-        use_tax_reassessment = st.toggle("Enable Institutional Tax Reassessment (Miami-Dade Standard)", key="tax_reassess")
-        with c2: opex_ins = st.number_input("Insurance", min_value=0.0, value=0.0, step=1000.0, key="opex_ins_input")
-        with c3: opex_mgmt_pct = st.number_input("Mgmt Fee (%)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, key="om")
-        tax_rate_pct = st.number_input("Pro-Forma Tax Rate (%)", min_value=0.0, max_value=10.0, value=float(st.session_state.get("tax_rate_pct", 2.10)), step=0.01, key="tax_rate_pct", help="Miami-Dade commercial millage is approximately 2.0% to 2.2% in 2026 depending on municipality. Verify current rate at miamidade.gov/pa for the subject's tax district.")
-        c1,c2,c3 = st.columns(3)
-        with c1: opex_maint = st.number_input("Maintenance", min_value=0.0, value=0.0, step=1000.0, key="omn")
-        with c2: opex_util = st.number_input("Utilities (owner-paid)", min_value=0.0, value=0.0, step=500.0, key="ou")
-        with c3: opex_res = st.number_input("Reserves", min_value=0.0, value=0.0, step=500.0, key="orr")
-        opex_oth = st.number_input("Other Expenses", min_value=0.0, value=0.0, step=500.0, key="oox")
-        mgmt_floor = 0.0 if subj_type == "Land" else ((subj_units * 250) if (subj_type == "Multifamily" and subj_units > 0) else (subj_sf * 0.10))
-        opex_mgmt_d = max(egi*(opex_mgmt_pct/100), mgmt_floor)
-        fixed_opex_base = opex_ins + opex_maint + opex_util + opex_res + opex_oth
-        fixed_opex = fixed_opex_base + opex_mgmt_d
+        use_opex_override = st.toggle("Use Expense Ratio Override (% of EGI)", key="opex_override_toggle", help="Enable when you do not have line-item expense data. Calculates total OpEx as a percentage of EGI. Typical ranges: Multifamily 35-45% | NNN Retail 10-20% | Gross Retail 30-40% | Office 35-50% | Industrial NNN 10-25% | Industrial Gross 30-40% | Mixed-Use 35-50% | Land 5-10%")
+        if use_opex_override:
+            opex_override_pct = st.number_input("Expense Ratio (% of EGI)", min_value=1.0, max_value=95.0, value=float(st.session_state.get("opex_override_pct", 35.0)), step=1.0, key="opex_override_pct")
+            total_opex = egi * (opex_override_pct / 100.0) if egi > 0 else 0.0
+            opex_ratio = opex_override_pct
+            opex_tax = total_opex * 0.40
+            opex_ins = total_opex * 0.30
+            opex_mgmt_d = total_opex * 0.10
+            opex_maint = total_opex * 0.10
+            opex_util = total_opex * 0.05
+            opex_res = total_opex * 0.05
+            opex_oth = 0.0
+            income_tax_line = opex_tax
+            fixed_opex = total_opex
+            fixed_opex_base = total_opex - opex_mgmt_d
+            use_tax_reassessment = False
+            st.markdown(f'<div class="co info"><strong>Expense Ratio Override Active:</strong> {opex_override_pct:.1f}% of EGI = <strong>{fmt_d(total_opex)}</strong>. Line items are distributed via placeholder percentages for PDF generation. <strong>Note:</strong> In Miami-Dade, taxes and insurance frequently represent a significantly higher burden (60-70%+) of gross expenses.</div>', unsafe_allow_html=True)
+        else:
+            c1,c2,c3 = st.columns(3)
+            with c1: opex_tax = st.number_input("Property Taxes", min_value=0.0, value=0.0, step=1000.0, key="ot")
+            if st.session_state.get("_pa_tax_prefilled"):
+                st.caption("💡 Pre-filled from Miami-Dade PA tax roll. Verify current year amount.")
+            use_tax_reassessment = st.toggle("Enable Institutional Tax Reassessment (Miami-Dade Standard)", key="tax_reassess")
+            with c2: opex_ins = st.number_input("Insurance", min_value=0.0, value=0.0, step=1000.0, key="opex_ins_input")
+            with c3: opex_mgmt_pct = st.number_input("Mgmt Fee (%)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, key="om")
+            tax_rate_pct = st.number_input("Pro-Forma Tax Rate (%)", min_value=0.0, max_value=10.0, value=float(st.session_state.get("tax_rate_pct", 2.10)), step=0.01, key="tax_rate_pct", help="Miami-Dade commercial millage is approximately 2.0% to 2.2% in 2026 depending on municipality. Verify current rate at miamidade.gov/pa for the subject's tax district.")
+            c1,c2,c3 = st.columns(3)
+            with c1: opex_maint = st.number_input("Maintenance", min_value=0.0, value=0.0, step=1000.0, key="omn")
+            with c2: opex_util = st.number_input("Utilities (owner-paid)", min_value=0.0, value=0.0, step=500.0, key="ou")
+            with c3: opex_res = st.number_input("Reserves", min_value=0.0, value=0.0, step=500.0, key="orr")
+            opex_oth = st.number_input("Other Expenses", min_value=0.0, value=0.0, step=500.0, key="oox")
+            mgmt_floor = 0.0 if subj_type == "Land" else ((subj_units * 250) if (subj_type == "Multifamily" and subj_units > 0) else (subj_sf * 0.10))
+            opex_mgmt_d = max(egi*(opex_mgmt_pct/100), mgmt_floor)
+            fixed_opex_base = opex_ins + opex_maint + opex_util + opex_res + opex_oth
+            fixed_opex = fixed_opex_base + opex_mgmt_d
         loaded_cap = 0.0
         st.markdown(sl("Capitalization"), unsafe_allow_html=True)
         with st.expander("Miami-Dade Market Cap Rate Reference — Q1 2026"):
