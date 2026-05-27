@@ -636,10 +636,33 @@ with tab3:
         use_unit_mix = st.toggle("Enable Detailed Unit Mix / Rent Roll", key="use_unit_mix")
         st.markdown(sl("Current Income"), unsafe_allow_html=True)
         if use_unit_mix:
-            unit_mix_seed = pd.DataFrame([
-                {"Unit Type": "1BR", "Count": 0, "Vacant Count": 0, "Avg. SF": 0, "Current Rent/Mo": 0.0, "Market Rent/Mo": 0.0},
-                {"Unit Type": "2BR", "Count": 0, "Vacant Count": 0, "Avg. SF": 0, "Current Rent/Mo": 0.0, "Market Rent/Mo": 0.0},
-            ])
+            rr_dl, rr_up = st.columns([1, 2])
+            with rr_dl:
+                def build_rr_template():
+                    df = pd.DataFrame(columns=["Unit Type", "Count", "Vacant Count", "Avg. SF", "Current Rent/Mo", "Market Rent/Mo"])
+                    buf = io.BytesIO()
+                    df.to_excel(buf, index=False, engine='openpyxl')
+                    return buf.getvalue()
+                st.download_button("⬇ Download Rent Roll Template", build_rr_template(), "Estupinan_Rent_Roll.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            with rr_up:
+                uploaded_rr = st.file_uploader("Upload Rent Roll", type=["xlsx"], key="rr_upload", label_visibility="collapsed")
+
+            if uploaded_rr is not None:
+                try:
+                    uploaded_df = pd.read_excel(uploaded_rr)
+                    required_cols = ["Unit Type", "Count", "Vacant Count", "Avg. SF", "Current Rent/Mo", "Market Rent/Mo"]
+                    missing_cols = [col for col in required_cols if col not in uploaded_df.columns]
+                    if missing_cols:
+                        raise ValueError(f"Missing columns: {', '.join(missing_cols)}")
+                    unit_mix_seed = uploaded_df
+                except Exception as e:
+                    st.error(f"Invalid template format: {e}. Please download and use the provided Rent Roll Template.")
+                    unit_mix_seed = pd.DataFrame([{"Unit Type": "1BR", "Count": 0, "Vacant Count": 0, "Avg. SF": 0, "Current Rent/Mo": 0.0, "Market Rent/Mo": 0.0}])
+            else:
+                unit_mix_seed = pd.DataFrame([
+                    {"Unit Type": "1BR", "Count": 0, "Vacant Count": 0, "Avg. SF": 0, "Current Rent/Mo": 0.0, "Market Rent/Mo": 0.0},
+                    {"Unit Type": "2BR", "Count": 0, "Vacant Count": 0, "Avg. SF": 0, "Current Rent/Mo": 0.0, "Market Rent/Mo": 0.0},
+                ])
             unit_mix_df = st.data_editor(unit_mix_seed, num_rows="dynamic", use_container_width=True, key="unit_mix_editor")
             unit_mix_df = pd.DataFrame(unit_mix_df).fillna(0)
             for col in ["Count", "Vacant Count", "Avg. SF", "Current Rent/Mo", "Market Rent/Mo"]:
@@ -1133,6 +1156,12 @@ with tab5:
     with c2: mkt_abs = st.text_input("Absorption Trends", key="ma")
     mkt_factors = st.text_area("Market Factors", key="mf", height=80)
     st.markdown(sl("Demographics & Aerial Map"), unsafe_allow_html=True)
+    st.markdown('<div class="co info"><strong>Free Data Sources:</strong> Use these links to quickly pull data for the fields below.</div>', unsafe_allow_html=True)
+    link_c1, link_c2 = st.columns(2)
+    with link_c1:
+        st.link_button("↗ Free Demographics (Census Reporter)", url="https://censusreporter.org/", use_container_width=True)
+    with link_c2:
+        st.link_button("↗ Free Traffic Counts (Florida DOT)", url="https://tdaappsprod.dot.state.fl.us/fto/", use_container_width=True)
     c1,c2,c3 = st.columns(3)
     with c1: mkt_pop_1m = st.number_input("Population (1-Mile)", min_value=0, value=0, step=1000, key="mkt_pop_1m")
     with c2: mkt_pop_3m = st.number_input("Population (3-Mile)", min_value=0, value=0, step=1000, key="mkt_pop_3m")
