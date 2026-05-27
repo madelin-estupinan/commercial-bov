@@ -88,9 +88,14 @@ def lookup_miami_dade_pa(folio_number):
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        session = requests.Session()
+        session.get("https://www.miamidade.gov/propertysearch/", headers=headers, timeout=10)
+        response = session.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None, f"Miami-Dade PA returned status {response.status_code}. Check folio number."
+        content_type = response.headers.get("Content-Type", "")
+        if "json" not in content_type.lower():
+            return None, "Miami-Dade PA firewall blocked the automated lookup. Please enter property details manually."
         data = response.json()
         info = data.get("MinimumPropertyInfos")
         if isinstance(info, list) and len(info) > 0:
