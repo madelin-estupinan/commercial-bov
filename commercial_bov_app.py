@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import io, re, requests
+import io, re
 from datetime import datetime, date, timedelta
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
@@ -75,84 +75,6 @@ def sanitize_pdf_text(value):
     if value is None:
         return ""
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def lookup_miami_dade_pa(folio_number):
-    folio_clean = str(folio_number).strip().replace("-", "").replace(" ", "")
-    url = f"https://www.miamidade.gov/Apps/PA/PApublicServiceProxy/PaServicesProxy.ashx?Operation=GetPropertySearchByFolio&clientAppName=PropertySearch&folioNumber={folio_clean}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.miamidade.gov/propertysearch/",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        session = requests.Session()
-        session.get("https://www.miamidade.gov/propertysearch/", headers=headers, timeout=10)
-        response = session.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None, f"Miami-Dade PA returned status {response.status_code}. Check folio number."
-        content_type = response.headers.get("Content-Type", "")
-        if "json" not in content_type.lower():
-            return None, "Miami-Dade PA firewall blocked the automated lookup. Please enter property details manually."
-        data = response.json()
-        info = data.get("MinimumPropertyInfos")
-        if isinstance(info, list) and len(info) > 0:
-            info = info[0]
-        if not info:
-            return None, "No property found for that folio number. Verify it on miamidade.gov/propertysearch."
-
-        result = {}
-
-        site_address = info.get("SiteAddress")
-        city = info.get("City")
-        if site_address and city:
-            result["address"] = f"{site_address}, {city}, FL"
-
-        building_list = info.get("BuildingList")
-        if isinstance(building_list, list) and len(building_list) > 0:
-            building = building_list[0]
-            total_area = building.get("TotalArea")
-            year_built = building.get("YearBuilt")
-            units = building.get("Units")
-            if total_area not in (None, "", 0):
-                result["sf"] = int(float(total_area))
-            if year_built not in (None, "", 0):
-                result["yr"] = int(float(year_built))
-            if units not in (None, "", 0):
-                result["units"] = int(float(units))
-
-        land_list = info.get("LandList")
-        if isinstance(land_list, list) and len(land_list) > 0:
-            land = land_list[0]
-            land_area = land.get("LandArea")
-            if land_area not in (None, "", 0):
-                land_area_val = float(land_area)
-                if land_area_val < 100:
-                    land_area_val *= 43560
-                result["lot_sf"] = int(land_area_val)
-
-        owner_name = info.get("OwnerName1")
-        if owner_name:
-            result["owner"] = str(owner_name).title()
-
-        tax_year = info.get("TaxYear")
-        tax_info = None
-        if isinstance(tax_year, list) and len(tax_year) > 0:
-            tax_info = tax_year[0]
-        elif isinstance(tax_year, dict):
-            tax_info = tax_year
-        if isinstance(tax_info, dict):
-            ad_valorem_tax = tax_info.get("AdValoremTax")
-            if ad_valorem_tax not in (None, "", 0):
-                result["tax"] = float(ad_valorem_tax)
-
-        return result, None
-    except requests.exceptions.Timeout:
-        return None, "Miami-Dade PA lookup timed out. Try again or enter details manually."
-    except Exception as exc:
-        return None, f"Lookup failed: {exc} Enter details manually."
 
 st.set_page_config(page_title="Commercial Property Advisory BOV", page_icon="🏢", layout="wide", initial_sidebar_state="collapsed")
 local_db_path = Path(__file__).resolve().with_name("bov_history_local.db") if "__file__" in globals() else Path.cwd() / "bov_history_local.db"
@@ -288,40 +210,9 @@ with tab1:
     if subj_folio and len(subj_folio.replace("-", "").replace(" ", "")) >= 10:
         lookup_c1, lookup_c2 = st.columns([1, 3])
         with lookup_c1:
-            do_lookup = st.button("🔍 Autofill from Miami-Dade PA", key="pa_lookup_btn", use_container_width=True)
-        with lookup_c2:
-            pass
-        if do_lookup:
-            with st.spinner("Looking up folio on Miami-Dade Property Appraiser..."):
-                pa_data, pa_error = lookup_miami_dade_pa(subj_folio)
-            if pa_error is not None:
-                st.warning(pa_error)
-            elif pa_data is not None:
-                filled_fields = 0
-                if pa_data.get("address"):
-                    st.session_state["sa"] = pa_data["address"]
-                    filled_fields += 1
-                if pa_data.get("sf"):
-                    st.session_state["ssf"] = pa_data["sf"]
-                    filled_fields += 1
-                if pa_data.get("lot_sf"):
-                    st.session_state["sl2"] = pa_data["lot_sf"]
-                    filled_fields += 1
-                if pa_data.get("yr"):
-                    st.session_state["sy"] = pa_data["yr"]
-                    filled_fields += 1
-                if pa_data.get("units"):
-                    st.session_state["su"] = pa_data["units"]
-                    filled_fields += 1
-                if pa_data.get("owner"):
-                    st.session_state["owner_of_record"] = pa_data["owner"]
-                    filled_fields += 1
-                if pa_data.get("tax"):
-                    st.session_state["ot"] = pa_data["tax"]
-                    st.session_state["_pa_tax_prefilled"] = True
-                    filled_fields += 1
-                st.success(f"{filled_fields} fields were successfully filled.")
-                st.rerun()
+            folio_clean = subj_folio.replace("-", "").replace(" ", "")
+            pa_url = f"https://apps.miamidadepa.gov/propertysearch/#/?folio={folio_clean}"
+            st.link_button("↗ Open Miami-Dade PA Record", url=pa_url, use_container_width=True)
     c1,c2,c3 = st.columns(3)
     with c1: subj_type = st.selectbox("Property Type", PROPERTY_TYPES, key="st2")
     with c2: subj_cond = st.selectbox("Condition", CONDITIONS, key="sc")
@@ -810,8 +701,6 @@ with tab3:
         else:
             c1,c2,c3 = st.columns(3)
             with c1: opex_tax = st.number_input("Property Taxes", min_value=0.0, value=0.0, step=1000.0, key="ot")
-            if st.session_state.get("_pa_tax_prefilled"):
-                st.caption("💡 Pre-filled from Miami-Dade PA tax roll. Verify current year amount.")
             use_tax_reassessment = st.toggle("Enable Institutional Tax Reassessment (Miami-Dade Standard)", key="tax_reassess")
             with c2: opex_ins = st.number_input("Insurance", min_value=0.0, value=0.0, step=1000.0, key="opex_ins_input")
             with c3: opex_mgmt_pct = st.number_input("Mgmt Fee (%)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, key="om")
